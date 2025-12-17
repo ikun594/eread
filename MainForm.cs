@@ -2191,18 +2191,19 @@ namespace EReader
                 fontForm.MaximizeBox = false;
                 fontForm.MinimizeBox = false;
                 
+                // 读取已保存的字体和颜色设置
+                Font selectedFont = settings.GetFont();
+                Color selectedColor = settings.GetTextColor();
+                
                 Label fontLabel = new Label();
                 fontLabel.Text = "字体：";
                 fontLabel.Location = new Point(20, 20);
                 fontLabel.Size = new Size(50, 20);
                 
                 Button fontButton = new Button();
-                fontButton.Text = "选择字体";
+                fontButton.Text = $"{selectedFont.Name} {selectedFont.Size}pt"; // 显示当前字体
                 fontButton.Location = new Point(80, 18);
-                fontButton.Size = new Size(80, 25);
-                
-                Font selectedFont = new Font("微软雅黑", 12F);
-                Color selectedColor = Color.White;
+                fontButton.Size = new Size(180, 25);
                 
                 fontButton.Click += (s, args) =>
                 {
@@ -2223,10 +2224,11 @@ namespace EReader
                 colorLabel.Size = new Size(50, 20);
                 
                 Button colorButton = new Button();
-                colorButton.Text = "屏幕取色";
+                colorButton.Text = "选择颜色";
                 colorButton.Location = new Point(80, 58);
-                colorButton.Size = new Size(80, 25);
-                colorButton.BackColor = selectedColor;
+                colorButton.Size = new Size(100, 25);
+                colorButton.BackColor = selectedColor; // 显示当前颜色
+                colorButton.ForeColor = GetContrastColor(selectedColor);
                 
                 colorButton.Click += (s, args) =>
                 {
@@ -2250,8 +2252,15 @@ namespace EReader
                 okButton.Size = new Size(60, 30);
                 okButton.Click += (s, args) =>
                 {
+                    // 在改变字体前，记录当前阅读的行号位置
+                    int currentLine = textDisplay.GetScrollPosition();
+                    
+                    // 应用新字体和颜色
                     textDisplay.SetTextFont(selectedFont);
                     textDisplay.SetTextColor(selectedColor);
+                    
+                    // 字体改变后，重新跳转到原来的行号位置
+                    textDisplay.JumpToLine(currentLine);
                     
                     // 保存字体和颜色设置
                     settings.SetFont(selectedFont);
