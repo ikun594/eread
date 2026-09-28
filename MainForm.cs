@@ -30,6 +30,7 @@ namespace EReader
         public int LineSpacing { get; set; } = 4; // 行间距（像素）
         public int ParagraphSpacing { get; set; } = 8; // 段落间距（像素）
         public int WindowOpacity { get; set; } = 100; // 窗口透明度（0-100，100为完全不透明）
+        public string LastOpenedFilePath { get; set; } = "";
         public Dictionary<string, int> ReadingProgress { get; set; } = new Dictionary<string, int>(); // 文件路径 -> 滚动位置
         
         public static AppSettings Load()
@@ -494,80 +495,86 @@ namespace EReader
                 string line = textLines[i].Trim();
                 if (string.IsNullOrEmpty(line)) continue;
                 
-                // 更严格的长度过滤
-                if (line.Length < 3 || line.Length > 50) continue;
-                
-                // 排除纯数字行
-                if (System.Text.RegularExpressions.Regex.IsMatch(line, @"^\d+(\.\d+)*$")) continue;
+                if (line.Length < 2 || line.Length > 80) continue;
 
-                // 排除包含大量标点符号的行
-                // 排除包含大量标点符号的行
-                int punctuationCount = 0;
-                string punctuationChars = @"。，！？；：""''（）【】《》…";
-
-                foreach (char c in line)
-                {
-                    if (punctuationChars.IndexOf(c) >= 0)
-                    {
-                        punctuationCount++;
-                    }
-                }
-
-                if (punctuationCount > line.Length * 0.4) continue;
-
-
-                // 排除纯标点符号或特殊字符的行
-                if (System.Text.RegularExpressions.Regex.IsMatch(line, @"^[^\u4e00-\u9fa5a-zA-Z0-9]+$")) continue;
-                
-                // 检测章节标题的模式
                 if (IsChapterTitle(line))
                 {
                     chapters.Add(new ChapterInfo(line, i));
                 }
             }
-            
-            // 如果检测到的章节太多（可能误判），只保留最明显的章节标题
-            if (chapters.Count > textLines.Length * 0.05) // 降低阈值到5%
+
+            RemoveTableOfContentsEntries();
+        }
+
+        private void RemoveTableOfContentsEntries()
+        {
+            int tableOfContentsLine = Array.FindIndex(textLines, line =>
+                Regex.IsMatch(line.Trim(), @"^(目\s*录|contents?)$", RegexOptions.IgnoreCase));
+
+            if (tableOfContentsLine < 0)
             {
-                chapters = chapters.Where(c => 
-                    System.Text.RegularExpressions.Regex.IsMatch(c.Title, 
-                        @"^(第[一二三四五六七八九十\d]+[章节]|Chapter\s+\d+|[一二三四五六七八九十]+、)", 
-                        System.Text.RegularExpressions.RegexOptions.IgnoreCase)
-                ).ToList();
+                return;
             }
+
+            int firstCatalogChapter = chapters.FindIndex(chapter => chapter.LineNumber > tableOfContentsLine);
+            const int consecutiveMatchesRequired = 3;
+
+            if (firstCatalogChapter < 0 || chapters.Count - firstCatalogChapter < consecutiveMatchesRequired * 2)
+            {
+                return;
+            }
+
+            // 正文通常会按相同顺序再次出现目录开头的章节。只有连续匹配多章时，
+            // 才把第二组视为正文起点，避免因偶然重名而删除有效章节。
+            for (int candidate = firstCatalogChapter + consecutiveMatchesRequired;
+                 candidate <= chapters.Count - consecutiveMatchesRequired;
+                 candidate++)
+            {
+                bool isRepeatedCatalogStart = true;
+
+                for (int offset = 0; offset < consecutiveMatchesRequired; offset++)
+                {
+                    string catalogTitle = NormalizeChapterTitle(chapters[firstCatalogChapter + offset].Title);
+                    string candidateTitle = NormalizeChapterTitle(chapters[candidate + offset].Title);
+
+                    if (!string.Equals(catalogTitle, candidateTitle, StringComparison.OrdinalIgnoreCase))
+                    {
+                        isRepeatedCatalogStart = false;
+                        break;
+                    }
+                }
+
+                if (isRepeatedCatalogStart)
+                {
+                    chapters = chapters.Skip(candidate).ToList();
+                    return;
+                }
+            }
+        }
+
+        private static string NormalizeChapterTitle(string title)
+        {
+            return Regex.Replace(title.Trim(), @"\s+", " ");
         }
         
         private bool IsChapterTitle(string line)
         {
-            // 更严格的章节标题模式，只匹配最常见的格式
+            const string chineseNumber = @"[零〇一二两三四五六七八九十百千万亿\d]+";
             string[] chapterPatterns = {
-                @"^第[一二三四五六七八九十\d]+章[^0-9]*$",  // 第X章（结尾不能有数字）
-                @"^第[一二三四五六七八九十\d]+节[^0-9]*$",  // 第X节
-                @"^Chapter\s+\d+[^0-9]*$",                // Chapter X
-                @"^[一二三四五六七八九十]+、[^0-9]*$",      // 中文数字、
-                @"^\d{1,3}、[^0-9]*$",                    // 阿拉伯数字、（限制1-3位）
-                @"^【[^】]{1,20}】$"                       // 【标题】（限制长度）
+                $@"^第{chineseNumber}[章节回](?:\s*.*)?$",
+                @"^Chapter\s+\d+(?:\s*[:：.、-]?\s*.*)?$",
+                @"^(?:序章|楔子|引子|前言|后记|尾声|终章)(?:\s*.*)?$",
+                @"^番外(?:篇)?(?:\s*[:：.、-]?\s*.*)?$"
             };
             
             foreach (string pattern in chapterPatterns)
             {
-                if (System.Text.RegularExpressions.Regex.IsMatch(line, pattern, 
-                    System.Text.RegularExpressions.RegexOptions.IgnoreCase))
+                if (Regex.IsMatch(line, pattern, RegexOptions.IgnoreCase))
                 {
                     return true;
                 }
             }
-            
-            // 检查是否是短行且可能是标题（长度在3-50字符之间，且不包含常见的句子结构）
-            if (line.Length >= 3 && line.Length <= 50 && 
-                !line.Contains("。") && !line.Contains("，") && 
-                !line.Contains("的") && !line.Contains("了") &&
-                !line.Contains("是") && !line.Contains("在") &&
-                !System.Text.RegularExpressions.Regex.IsMatch(line, @"^\d+\.\d+.*")) // 排除小数
-            {
-                return true;
-            }
-            
+
             return false;
         }
         
@@ -599,9 +606,7 @@ namespace EReader
             
             // 改进的边界检查
             int lineHeight = Math.Max(textFont.Height / 2, textFont.Height + lineSpacing);
-            int startY = Math.Min(20, this.Height / 4);
-            int bottomY = this.Height - startY;
-            int visibleAreaHeight = bottomY - startY;
+            int visibleAreaHeight = this.ClientSize.Height;
             int visibleLines = visibleAreaHeight / lineHeight; // 完全可见的行数
             
             // 计算更精确的最大滚动偏移
@@ -647,9 +652,7 @@ namespace EReader
         public bool IsAtBottom()
         {
             int lineHeight = Math.Max(textFont.Height / 2, textFont.Height + lineSpacing);
-            int startY = Math.Min(20, this.Height / 4);
-            int bottomY = this.Height - startY;
-            int visibleAreaHeight = bottomY - startY;
+            int visibleAreaHeight = this.ClientSize.Height;
             int visibleLines = visibleAreaHeight / lineHeight; // 完全可见的行数
             
             // 计算最大滚动偏移：确保最后一行完全可见
@@ -680,9 +683,7 @@ namespace EReader
             float targetOffset = lineNumber * lineHeight;
             
             // 计算最大滚动偏移
-            int startY = Math.Min(20, this.Height / 4);
-            int bottomY = this.Height - startY;
-            int visibleAreaHeight = bottomY - startY;
+            int visibleAreaHeight = this.ClientSize.Height;
             int visibleLines = visibleAreaHeight / lineHeight;
             float maxScrollOffset = Math.Max(0, (textLines.Length - visibleLines) * lineHeight);
             
@@ -709,7 +710,7 @@ namespace EReader
         private int GetVisibleLines()
         {
             int lineHeight = Math.Max(textFont.Height / 2, textFont.Height + lineSpacing); // 允许负间距压缩
-            int availableHeight = Math.Max(20, this.Height - 40); // 确保至少有20像素高度
+            int availableHeight = Math.Max(1, this.ClientSize.Height);
             return Math.Max(1, availableHeight / lineHeight);
         }
         
@@ -726,10 +727,10 @@ namespace EReader
             g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.HighQuality;
             g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
             
-            // 预计算常用值（允许负的行间距来压缩字体自带的间距，但确保最小高度）
+            // 预计算常用值（允许负的行间距来压缩字体自带的间距，但确保文字不会重叠）
             int lineHeight = Math.Max(textFont.Height / 2, textFont.Height + lineSpacing);
-            int startY = Math.Min(20, this.Height / 4);
-            int bottomY = this.Height - startY; // 底部边界
+            const int startY = 0;
+            int bottomY = this.ClientSize.Height;
             int leftPadding = Math.Min(15, this.Width / 12); // 减少左边距
             int rightPadding = Math.Min(15, this.Width / 12); // 添加右边距
             // 确保文本宽度随窗口宽度动态调整，最小宽度设为50像素以支持极窄窗口
@@ -770,8 +771,8 @@ namespace EReader
                     
                     if (string.IsNullOrEmpty(line))
                     {
-                        // 空行处理
-                        currentY += Math.Max(lineHeight, paragraphSpacing);
+                        // 空白行只表示段落间距；设置为0时不再额外占据一整行。
+                        currentY += paragraphSpacing;
                         continue;
                     }
                     
@@ -783,27 +784,16 @@ namespace EReader
                     {
                         Rectangle measureRect = new Rectangle(0, 0, textWidth, int.MaxValue);
                         Size textSize = TextRenderer.MeasureText(g, line, textFont, measureRect.Size, 
-                            TextFormatFlags.Left | TextFormatFlags.Top | TextFormatFlags.WordBreak | TextFormatFlags.TextBoxControl);
-                        actualLineHeight = Math.Max(lineHeight, textSize.Height);
+                            TextFormatFlags.Left | TextFormatFlags.Top | TextFormatFlags.WordBreak |
+                            TextFormatFlags.TextBoxControl | TextFormatFlags.NoPadding);
+                        actualLineHeight = Math.Max(textFont.Height / 2, textSize.Height + lineSpacing);
                     }
                     
-                    // 严格的可见性检查：只渲染完全可见的行
-                    bool isCompletelyVisible = (currentY >= startY) && (currentY + actualLineHeight <= bottomY);
-                    
-                    // 特殊边界处理
-                    if (IsAtTop() && i == 0)
-                    {
-                        // 顶部第一行：总是完全显示
-                        isCompletelyVisible = true;
-                    }
-                    else if (IsAtBottom())
-                    {
-                        // 底部：只显示完全可见的行
-                        isCompletelyVisible = (currentY >= startY) && (currentY + actualLineHeight <= bottomY);
-                    }
-                    
-                    // 只渲染完全可见的行，避免重叠和残留
-                    if (isCompletelyVisible)
+                    // 与窗口有交集的文字行都绘制，超出控件的部分由系统裁剪。
+                    // 这样平滑滚动时不会因为丢弃半行而在顶部或底部留下空白。
+                    bool isVisible = currentY < bottomY && currentY + actualLineHeight > startY;
+
+                    if (isVisible)
                     {
                         Rectangle textRect = new Rectangle(
                             leftPadding, 
@@ -814,7 +804,7 @@ namespace EReader
                         
                         TextRenderer.DrawText(g, line, textFont, textRect, textColor, this.BackColor,
                             TextFormatFlags.Left | TextFormatFlags.Top | TextFormatFlags.WordBreak | 
-                            TextFormatFlags.TextBoxControl);
+                            TextFormatFlags.TextBoxControl | TextFormatFlags.NoPadding);
                     }
                     
                     currentY += actualLineHeight;
@@ -838,7 +828,7 @@ namespace EReader
         public void SetSpacing(int lineSpacing, int paragraphSpacing)
         {
             this.lineSpacing = lineSpacing;
-            this.paragraphSpacing = paragraphSpacing;
+            this.paragraphSpacing = Math.Max(0, paragraphSpacing);
             this.Invalidate();
         }
         
@@ -915,6 +905,7 @@ namespace EReader
         
         private string currentFilePath = "";
         private bool isContentVisible = false;
+        private bool hasTriedRestoringLastFile = false;
         private System.Windows.Forms.Timer progressSaveTimer; // 延迟保存进度的定时器
         
         // 网页导航相关
@@ -963,6 +954,13 @@ namespace EReader
             settings = AppSettings.Load();
             
             InitializeComponent();
+
+            Icon? applicationIcon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
+            if (applicationIcon != null)
+            {
+                this.Icon = applicationIcon;
+            }
+
             SetupForm();
             CreateControls();
             CreateContextMenu();
@@ -974,6 +972,44 @@ namespace EReader
             
             // 确保窗口调整大小时文本能正确换行
             this.Resize += MainForm_Resize;
+        }
+
+        protected override async void OnShown(EventArgs e)
+        {
+            base.OnShown(e);
+
+            if (hasTriedRestoringLastFile)
+            {
+                return;
+            }
+
+            hasTriedRestoringLastFile = true;
+            string lastFilePath = settings.LastOpenedFilePath;
+
+            if (string.IsNullOrWhiteSpace(lastFilePath))
+            {
+                return;
+            }
+
+            if (!File.Exists(lastFilePath))
+            {
+                settings.LastOpenedFilePath = "";
+                settings.Save();
+                return;
+            }
+
+            try
+            {
+                hoverLabel.Text = $"正在恢复上次打开的文件...\n{Path.GetFileName(lastFilePath)}";
+                hoverLabel.ForeColor = Color.Yellow;
+                await LoadFileAsync(lastFilePath);
+            }
+            catch
+            {
+                hoverLabel.Text = "欢迎使用极简单行阅读器，请点击右键菜单打开文本或者网页";
+                hoverLabel.ForeColor = Color.LightGray;
+                hoverLabel.Visible = false;
+            }
         }
         
         private void MainForm_Resize(object sender, EventArgs e)
@@ -1540,7 +1576,9 @@ namespace EReader
                     textDisplay.BackColor = this.BackColor;
                     
                     currentFilePath = filePath;
-                    
+                    settings.LastOpenedFilePath = Path.GetFullPath(filePath);
+                    settings.Save();
+
                     // 标记有内容，更新提示文字
                     isContentVisible = true;
                     hoverLabel.Text = $"已加载：{Path.GetFileName(filePath)}\n鼠标悬停查看内容";
@@ -2384,9 +2422,10 @@ namespace EReader
             NumericUpDown paragraphSpacingInput = new NumericUpDown();
             paragraphSpacingInput.Location = new Point(130, 58);
             paragraphSpacingInput.Size = new Size(120, 20);
-            paragraphSpacingInput.Minimum = -10; // 允许负值
+            paragraphSpacingInput.Minimum = 0;
             paragraphSpacingInput.Maximum = 50;
-            paragraphSpacingInput.Value = settings.ParagraphSpacing;
+            paragraphSpacingInput.Value = Math.Max((int)paragraphSpacingInput.Minimum,
+                Math.Min((int)paragraphSpacingInput.Maximum, settings.ParagraphSpacing));
             paragraphSpacingInput.BackColor = Color.FromArgb(60, 60, 60);
             paragraphSpacingInput.ForeColor = Color.White;
             
