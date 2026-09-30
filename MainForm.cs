@@ -363,7 +363,7 @@ namespace EReader
     {
         private string[] textLines = new string[0];
         private int scrollPosition = 0; // 基于行的滚动位置（保持兼容性）
-        private float pixelScrollOffset = 0; // 基于像素的滚动偏移
+        private float pixelScrollOffset = 0; // 当前首行内部的像素偏移
         private Font textFont = new Font("微软雅黑", 12F);
         private Color textColor = Color.White;
         private const int MAX_LINES_TO_PROCESS = 10000; // 限制处理的最大行数
@@ -597,67 +597,42 @@ namespace EReader
         
         public void ScrollByPixels(float deltaPixels)
         {
-            if (textLines.Length == 0) return;
-            
+            if (textLines.Length == 0 || Math.Abs(deltaPixels) < 0.1f) return;
+
+            int oldPosition = scrollPosition;
             float oldOffset = pixelScrollOffset;
-            
-            // 更新像素偏移
-            pixelScrollOffset += deltaPixels;
-            
-            // 改进的边界检查
-            int lineHeight = Math.Max(textFont.Height / 2, textFont.Height + lineSpacing);
-            int visibleAreaHeight = this.ClientSize.Height;
-            int visibleLines = visibleAreaHeight / lineHeight; // 完全可见的行数
-            
-            // 计算更精确的最大滚动偏移
-            // 确保最后一行完全显示时停止滚动
-            float maxScrollOffset = Math.Max(0, (textLines.Length - visibleLines) * lineHeight);
-            
-            // 应用边界限制
-            pixelScrollOffset = Math.Max(0, Math.Min(maxScrollOffset, pixelScrollOffset));
-            
-            // 在接近边界时，对齐到行边界，避免显示不完整的行
-            if (pixelScrollOffset >= maxScrollOffset - lineHeight * 0.1f)
+            int textWidth = GetTextWidth();
+
+            if (deltaPixels > 0)
             {
-                pixelScrollOffset = maxScrollOffset; // 精确对齐到底部
+                MoveDownByPixels(deltaPixels, textWidth);
+                KeepBottomFilled(textWidth);
             }
-            else if (pixelScrollOffset <= lineHeight * 0.1f)
+            else
             {
-                pixelScrollOffset = 0; // 精确对齐到顶部
+                MoveUpByPixels(-deltaPixels, textWidth);
             }
-            
-            // 只有实际发生滚动时才重绘
-            if (Math.Abs(pixelScrollOffset - oldOffset) > 0.1f)
+
+            if (scrollPosition != oldPosition || Math.Abs(pixelScrollOffset - oldOffset) > 0.1f)
             {
-                // 更新基于行的滚动位置（用于兼容性）
-                scrollPosition = (int)(pixelScrollOffset / lineHeight);
-                
-                // 立即重绘，不使用节流
                 this.Invalidate();
             }
         }
-        
-        private float CalculateTotalContentHeight()
+
+        public float GetWheelScrollStep()
         {
-            // 简化计算，提高性能
-            int lineHeight = Math.Max(textFont.Height / 2, textFont.Height + lineSpacing);
-            return textLines.Length * lineHeight;
+            return Math.Max(textFont.Height / 2, textFont.Height + lineSpacing);
         }
         
         public bool IsAtTop()
         {
-            return pixelScrollOffset <= 0;
+            return scrollPosition == 0 && pixelScrollOffset <= 0.1f;
         }
         
         public bool IsAtBottom()
         {
-            int lineHeight = Math.Max(textFont.Height / 2, textFont.Height + lineSpacing);
-            int visibleAreaHeight = this.ClientSize.Height;
-            int visibleLines = visibleAreaHeight / lineHeight; // 完全可见的行数
-            
-            // 计算最大滚动偏移：确保最后一行完全可见
-            float maxScrollOffset = Math.Max(0, (textLines.Length - visibleLines) * lineHeight);
-            return pixelScrollOffset >= maxScrollOffset - 1; // 允许1像素的误差
+            if (textLines.Length == 0) return true;
+            return GetRemainingContentHeight(GetTextWidth(), ClientSize.Height) <= ClientSize.Height + 0.5f;
         }
         
         public void JumpToProgress(float percentage)
@@ -678,20 +653,9 @@ namespace EReader
             // 确保行号在有效范围内
             lineNumber = Math.Max(0, Math.Min(lineNumber, textLines.Length - 1));
             
-            // 计算目标像素偏移
-            int lineHeight = Math.Max(textFont.Height / 2, textFont.Height + lineSpacing);
-            float targetOffset = lineNumber * lineHeight;
-            
-            // 计算最大滚动偏移
-            int visibleAreaHeight = this.ClientSize.Height;
-            int visibleLines = visibleAreaHeight / lineHeight;
-            float maxScrollOffset = Math.Max(0, (textLines.Length - visibleLines) * lineHeight);
-            
-            // 应用边界限制
-            pixelScrollOffset = Math.Max(0, Math.Min(maxScrollOffset, targetOffset));
-            
-            // 更新基于行的滚动位置（用于兼容性）
-            scrollPosition = (int)(pixelScrollOffset / lineHeight);
+            scrollPosition = lineNumber;
+            pixelScrollOffset = 0;
+            KeepBottomFilled(GetTextWidth());
             
             // 立即重绘
             this.Invalidate();
@@ -707,11 +671,105 @@ namespace EReader
         }
         
         
-        private int GetVisibleLines()
+        private int GetTextWidth()
         {
-            int lineHeight = Math.Max(textFont.Height / 2, textFont.Height + lineSpacing); // 允许负间距压缩
-            int availableHeight = Math.Max(1, this.ClientSize.Height);
-            return Math.Max(1, availableHeight / lineHeight);
+            int leftPadding = Math.Min(15, this.Width / 12);
+            int rightPadding = Math.Min(15, this.Width / 12);
+            return Math.Max(50, this.ClientSize.Width - leftPadding - rightPadding);
+        }
+
+        private TextFormatFlags GetTextFormatFlags()
+        {
+            return TextFormatFlags.Left | TextFormatFlags.Top | TextFormatFlags.WordBreak |
+                TextFormatFlags.TextBoxControl | TextFormatFlags.NoPadding;
+        }
+
+        private float GetLinePixelHeight(int lineIndex, int textWidth)
+        {
+            if (lineIndex < 0 || lineIndex >= textLines.Length)
+            {
+                return 0;
+            }
+
+            if (string.IsNullOrEmpty(textLines[lineIndex]))
+            {
+                return paragraphSpacing;
+            }
+
+            Size measuredSize = TextRenderer.MeasureText(
+                textLines[lineIndex], textFont, new Size(textWidth, int.MaxValue), GetTextFormatFlags());
+            return Math.Max(textFont.Height / 2, measuredSize.Height + lineSpacing);
+        }
+
+        private void MoveDownByPixels(float pixels, int textWidth)
+        {
+            float remaining = pixels;
+            while (remaining > 0.1f && scrollPosition < textLines.Length)
+            {
+                float lineHeight = GetLinePixelHeight(scrollPosition, textWidth);
+                float available = Math.Max(0, lineHeight - pixelScrollOffset);
+
+                if (remaining < available)
+                {
+                    pixelScrollOffset += remaining;
+                    break;
+                }
+
+                remaining -= available;
+                if (scrollPosition >= textLines.Length - 1)
+                {
+                    pixelScrollOffset = lineHeight;
+                    break;
+                }
+
+                scrollPosition++;
+                pixelScrollOffset = 0;
+            }
+        }
+
+        private void MoveUpByPixels(float pixels, int textWidth)
+        {
+            float remaining = pixels;
+            while (remaining > 0.1f)
+            {
+                if (pixelScrollOffset > 0)
+                {
+                    float movement = Math.Min(pixelScrollOffset, remaining);
+                    pixelScrollOffset -= movement;
+                    remaining -= movement;
+                    continue;
+                }
+
+                if (scrollPosition == 0)
+                {
+                    pixelScrollOffset = 0;
+                    break;
+                }
+
+                scrollPosition--;
+                pixelScrollOffset = GetLinePixelHeight(scrollPosition, textWidth);
+            }
+        }
+
+        private float GetRemainingContentHeight(int textWidth, float stopAfterHeight)
+        {
+            float height = -pixelScrollOffset;
+            for (int i = scrollPosition; i < textLines.Length && height <= stopAfterHeight; i++)
+            {
+                height += GetLinePixelHeight(i, textWidth);
+            }
+            return height;
+        }
+
+        private void KeepBottomFilled(int textWidth)
+        {
+            if (textLines.Length == 0 || ClientSize.Height <= 0) return;
+
+            float remainingHeight = GetRemainingContentHeight(textWidth, ClientSize.Height);
+            if (remainingHeight < ClientSize.Height)
+            {
+                MoveUpByPixels(ClientSize.Height - remainingHeight, textWidth);
+            }
         }
         
         protected override void OnPaint(PaintEventArgs e)
@@ -727,8 +785,6 @@ namespace EReader
             g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.HighQuality;
             g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
             
-            // 预计算常用值（允许负的行间距来压缩字体自带的间距，但确保文字不会重叠）
-            int lineHeight = Math.Max(textFont.Height / 2, textFont.Height + lineSpacing);
             const int startY = 0;
             int bottomY = this.ClientSize.Height;
             int leftPadding = Math.Min(15, this.Width / 12); // 减少左边距
@@ -747,19 +803,8 @@ namespace EReader
             
             using (Brush textBrush = new SolidBrush(textColor))
             {
-                // 基于像素偏移的平滑滚动渲染
-                float currentY = startY - (pixelScrollOffset % lineHeight);
-                int startLineIndex = (int)(pixelScrollOffset / lineHeight);
-                
-                // 特殊处理：在顶部时，确保第一行完全显示
-                if (IsAtTop())
-                {
-                    currentY = startY;
-                    startLineIndex = 0;
-                }
-                
-                // 确保起始行索引有效
-                startLineIndex = Math.Max(0, Math.Min(startLineIndex, textLines.Length - 1));
+                int startLineIndex = scrollPosition;
+                float currentY = startY - pixelScrollOffset;
                 
                 // 渲染可见区域的文本
                 for (int i = startLineIndex; i < textLines.Length; i++)
@@ -769,24 +814,13 @@ namespace EReader
                     
                     string line = textLines[i];
                     
+                    float actualLineHeight = GetLinePixelHeight(i, textWidth);
+
                     if (string.IsNullOrEmpty(line))
                     {
                         // 空白行只表示段落间距；设置为0时不再额外占据一整行。
-                        currentY += paragraphSpacing;
+                        currentY += actualLineHeight;
                         continue;
-                    }
-                    
-                    // 计算实际需要的行高（支持自动换行）
-                    float actualLineHeight = lineHeight;
-                    
-                    // 始终计算文本实际需要的高度，以支持自动换行
-                    if (!string.IsNullOrEmpty(line))
-                    {
-                        Rectangle measureRect = new Rectangle(0, 0, textWidth, int.MaxValue);
-                        Size textSize = TextRenderer.MeasureText(g, line, textFont, measureRect.Size, 
-                            TextFormatFlags.Left | TextFormatFlags.Top | TextFormatFlags.WordBreak |
-                            TextFormatFlags.TextBoxControl | TextFormatFlags.NoPadding);
-                        actualLineHeight = Math.Max(textFont.Height / 2, textSize.Height + lineSpacing);
                     }
                     
                     // 与窗口有交集的文字行都绘制，超出控件的部分由系统裁剪。
@@ -803,8 +837,7 @@ namespace EReader
                         );
                         
                         TextRenderer.DrawText(g, line, textFont, textRect, textColor, this.BackColor,
-                            TextFormatFlags.Left | TextFormatFlags.Top | TextFormatFlags.WordBreak | 
-                            TextFormatFlags.TextBoxControl | TextFormatFlags.NoPadding);
+                            GetTextFormatFlags());
                     }
                     
                     currentY += actualLineHeight;
@@ -822,6 +855,8 @@ namespace EReader
         {
             textFont?.Dispose();
             textFont = font;
+            pixelScrollOffset = 0;
+            KeepBottomFilled(GetTextWidth());
             this.Invalidate();
         }
         
@@ -829,6 +864,8 @@ namespace EReader
         {
             this.lineSpacing = lineSpacing;
             this.paragraphSpacing = Math.Max(0, paragraphSpacing);
+            pixelScrollOffset = 0;
+            KeepBottomFilled(GetTextWidth());
             this.Invalidate();
         }
         
@@ -840,12 +877,15 @@ namespace EReader
         public void SetScrollPosition(int position)
         {
             scrollPosition = Math.Max(0, Math.Min(position, textLines.Length - 1));
-            
-            // 同步更新像素偏移
-            int lineHeight = Math.Max(textFont.Height / 2, textFont.Height + lineSpacing);
-            pixelScrollOffset = scrollPosition * lineHeight;
-            
+            pixelScrollOffset = 0;
+            KeepBottomFilled(GetTextWidth());
             this.Invalidate();
+        }
+
+        protected override void OnSizeChanged(EventArgs e)
+        {
+            base.OnSizeChanged(e);
+            KeepBottomFilled(GetTextWidth());
         }
         
         public float GetCurrentProgress()
@@ -906,6 +946,7 @@ namespace EReader
         private string currentFilePath = "";
         private bool isContentVisible = false;
         private bool hasTriedRestoringLastFile = false;
+        private int mouseWheelDeltaRemainder = 0;
         private System.Windows.Forms.Timer progressSaveTimer; // 延迟保存进度的定时器
         
         // 网页导航相关
@@ -1294,27 +1335,26 @@ namespace EReader
         // 鼠标滚轮控制文本滚动
         private void TextDisplay_MouseWheel(object sender, MouseEventArgs e)
         {
-            if (textDisplay.Visible && isContentVisible)
+            if (!textDisplay.Visible || !isContentVisible || e.Delta == 0)
             {
-                // 检查滚动边界，提供边界反馈
-                bool isAtTop = textDisplay.IsAtTop();
-                bool isAtBottom = textDisplay.IsAtBottom();
-                
-                // 如果已经在边界，减少滚动量，提供阻尼效果
-                float scrollAmount = e.Delta / 120.0f * 40;
-                
-                if ((e.Delta > 0 && isAtTop) || (e.Delta < 0 && isAtBottom))
-                {
-                    // 在边界处减少滚动量，提供阻尼感
-                    scrollAmount *= 0.3f;
-                }
-                
-                // 直接滚动，减少方法调用开销
-                textDisplay.ScrollByPixels(-scrollAmount); // 注意：e.Delta为正时向上滚动
-                
-                // 延迟保存进度，避免影响滚动性能
-                SaveReadingProgressDelayed();
+                return;
             }
+
+            // 高精度滚轮可能一次只发送一小部分刻度。方向改变时丢弃旧方向的余量，
+            // 累计满一个标准刻度后再滚动，避免同样的手势有时半行、有时多行。
+            if (mouseWheelDeltaRemainder != 0 &&
+                Math.Sign(mouseWheelDeltaRemainder) != Math.Sign(e.Delta))
+            {
+                mouseWheelDeltaRemainder = 0;
+            }
+
+            mouseWheelDeltaRemainder += e.Delta;
+            int wheelSteps = mouseWheelDeltaRemainder / SystemInformation.MouseWheelScrollDelta;
+            if (wheelSteps == 0) return;
+
+            mouseWheelDeltaRemainder -= wheelSteps * SystemInformation.MouseWheelScrollDelta;
+            textDisplay.ScrollByPixels(-wheelSteps * textDisplay.GetWheelScrollStep());
+            SaveReadingProgressDelayed();
         }
         
         // 检测鼠标位置并设置光标
